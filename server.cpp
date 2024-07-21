@@ -1,7 +1,9 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cassert>
+#include <stdexcept>
 #include <system_error>
+#include <functional>
 #include <fcntl.h>
 #include <map>
 #include <sys/epoll.h>
@@ -27,6 +29,12 @@ std::error_category const &gai_category() {
     return instance;
 }
 
+[[noreturn]] void _throw_system_error(const char *what) {
+    auto ec = std::error_code(errno, std::system_category());
+    fmt::println(stderr, "{}: {}", what, ec.message());
+    throw std::system_error(ec, what);
+}
+
 template <int Except = 0, class T>
 T check_error(const char *what, T res) {
     if (res == -1) {
@@ -35,9 +43,7 @@ T check_error(const char *what, T res) {
                 return -1;
             }
         }
-        auto ec = std::error_code(errno, std::system_category());
-        fmt::println(stderr, "{}: {}", what, ec.message());
-        throw std::system_error(ec, what);
+        _throw_system_error(what);
     }
     return res;
 }
@@ -143,6 +149,14 @@ struct bytes_const_view {
         return data() + size();
     }
 
+    bytes_const_view subspan(size_t start, size_t len) const {
+        if (start > size())
+            throw std::out_of_range("bytes_const_view::subspan");
+        if (len > size() - start)
+            len = size() - start;
+        return {data() + start, len};
+    }
+
     operator std::string_view() const noexcept {
         return std::string_view{data(), size()};
     }
@@ -166,6 +180,14 @@ struct bytes_view {
 
     char *end() const noexcept {
         return data() + size();
+    }
+
+    bytes_view subspan(size_t start, size_t len) const {
+        if (start > size())
+            throw std::out_of_range("bytes_view::subspan");
+        if (len > size() - start)
+            len = size() - start;
+        return {data() + start, len};
     }
 
     operator bytes_const_view() const noexcept {
@@ -212,6 +234,14 @@ struct bytes_buffer {
         return data() + size();
     }
 
+    bytes_const_view subspan(size_t start, size_t len) const {
+        return operator bytes_const_view().subspan(start, len);
+    }
+
+    bytes_view subspan(size_t start, size_t len) {
+        return operator bytes_view().subspan(start, len);
+    }
+
     operator bytes_const_view() const noexcept {
         return bytes_const_view{m_data.data(), m_data.size()};
     }
@@ -226,6 +256,15 @@ struct bytes_buffer {
 
     void append(bytes_const_view chunk) {
         m_data.insert(m_data.end(), chunk.begin(), chunk.end());
+    }
+
+    void append(std::string_view chunk) {
+        m_data.insert(m_data.end(), chunk.begin(), chunk.end());
+    }
+
+    template <size_t N>
+    void append_literial(const char (&literial)[N]) {
+        append(std::string_view{literial, N - 1});
     }
 
     void resize(size_t n) {
@@ -279,12 +318,12 @@ struct http11_header_parser {
 
     void _extract_headers() {
         std::string_view header = m_header;
-        size_t pos = header.find("\r\n");
+        size_t pos = header.find("\r\n", 0, 2);
         while (pos != std::string::npos) {
             // 跳过 "\r\n"
             pos += 2;
             // 从当前位置开始找，先找到下一行位置（可能为 npos）
-            size_t next_pos = header.find("\r\n", pos);
+            size_t next_pos = header.find("\r\n", pos, 2);
             size_t line_len = std::string::npos;
             if (next_pos != std::string::npos) {
                 // 如果下一行还不是结束，那么 line_len 设为本行开始到下一行之间的距离
@@ -292,7 +331,7 @@ struct http11_header_parser {
             }
             // 就能切下本行
             std::string_view line = header.substr(pos, line_len);
-            size_t colon = line.find(": ");
+            size_t colon = line.find(": ", 0, 2);
             if (colon != std::string::npos) {
                 // 每一行都是 "键: 值"
                 std::string key = std::string(line.substr(0, colon));
@@ -313,10 +352,14 @@ struct http11_header_parser {
 
     void push_chunk(bytes_const_view chunk) {
         assert(!m_header_finished);
+        size_t old_size = m_header.size();
         m_header.append(chunk);
         std::string_view header = m_header;
         // 如果还在解析头部的话，尝试判断头部是否结束
-        size_t header_len = header.find("\r\n\r\n");
+        if (old_size < 4)
+            old_size = 4;
+        old_size -= 4;
+        size_t header_len = header.find("\r\n\r\n", old_size, 4);
         if (header_len != std::string::npos) {
             // 头部已经结束
             m_header_finished = true;
@@ -336,7 +379,7 @@ struct http11_header_parser {
         return m_header_keys;
     }
 
-    std::string &headers_raw() {
+    bytes_buffer &headers_raw() {
         return m_header;
     }
 
@@ -429,6 +472,7 @@ struct _http_base_parser {
     }
 
     void push_chunk(bytes_const_view chunk) {
+        assert(!m_body_finished);
         if (!m_header_parser.header_finished()) {
             m_header_parser.push_chunk(chunk);
             if (m_header_parser.header_finished()) {
@@ -496,21 +540,21 @@ struct http11_header_writer {
 
     void begin_header(std::string first, std::string_view second, std::string_view third) {
         m_buffer.append(first);
-        m_buffer.append(" ");
+        m_buffer.append_literial(" ");
         m_buffer.append(second);
-        m_buffer.append(" ");
+        m_buffer.append_literial(" ");
         m_buffer.append(third);
     }
 
     void write_header(std::string_view key, std::string_view value) {
-        m_buffer.append("\r\n");
+        m_buffer.append_literial("\r\n");
         m_buffer.append(key);
-        m_buffer.append(": ");
+        m_buffer.append_literial(": ");
         m_buffer.append(value);
     }
 
     void end_header() {
-        m_buffer.append("\r\n\r\n");
+        m_buffer.append_literial("\r\n\r\n");
     }
 };
 
@@ -571,6 +615,7 @@ void server() {
             bytes_buffer buf(1024);
             while (true) {
                 http_request_parser req_parse;
+                fmt::println("开始读取...");
                 do {
                     // 注意：TCP 基于流，可能粘包
                     size_t n = CHECK_CALL(read, connid, buf.data(), buf.size());
@@ -579,8 +624,9 @@ void server() {
                         fmt::println("收到对面关闭了连接: {}", connid);
                         goto quit;
                     }
+                    fmt::println("读取到了 {} 字节: {}", n, std::string_view{buf.data(), n});
                     // 成功读取，则推入解析
-                    req_parse.push_chunk(buf);
+                    req_parse.push_chunk(buf.subspan(0, n));
                 } while (!req_parse.request_finished());
                 fmt::println("收到请求: {}", connid);
                 // fmt::println("请求头: {}", req_parse.headers_raw());
@@ -590,7 +636,7 @@ void server() {
                 if (body.empty()) {
                     body = "你好，你的请求正文为空哦";
                 } else {
-                    body = "你好，你的请求是: [" + body + "]";
+                    body = fmt::format("你好，你的请求是: [{}]，共 {} 字节", body, body.size());
                 }
 
                 http_response_writer res_writer;
