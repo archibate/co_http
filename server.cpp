@@ -1,17 +1,15 @@
 #include <algorithm>
 #include <arpa/inet.h>
 #include <cassert>
-#include <deque>
 #include <stdexcept>
 #include <system_error>
-#include <functional>
 #include <fcntl.h>
+#include <array>
 #include <map>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netdb.h>
-#include <thread>
 #include <type_traits>
 #include <unistd.h>
 #include <fmt/format.h>
@@ -19,25 +17,62 @@
 #include <utility>
 #include <vector>
 
-struct no_move {
-    no_move() = default;
-    no_move(no_move &&) = delete;
-    no_move &operator=(no_move &&) = delete;
-    no_move(no_move const &) = delete;
-    no_move &operator=(no_move const &) = delete;
+template <class T>
+struct expected {
+    std::make_signed_t<T> m_res;
+
+    expected() = default;
+    expected(std::make_signed_t<T> res) noexcept : m_res(res) {}
+
+    int error() const noexcept {
+        if (m_res < 0) {
+            return -m_res;
+        }
+        return 0;
+    }
+
+    bool is_error(int err) const noexcept {
+        return m_res == -err;
+    }
+
+    std::error_code error_code() const noexcept {
+        if (m_res < 0) {
+            return std::error_code(-m_res, std::system_category());
+        }
+        return std::error_code();
+    }
+
+    T expect(const char *what) const {
+        if (m_res < 0) {
+            auto ec = error_code();
+            fmt::println(stderr, "{}: {}", what, ec.message());
+            throw std::system_error(ec, what);
+        }
+        return m_res;
+    }
+
+    T value() const {
+        if (m_res < 0) {
+            auto ec = error_code();
+            fmt::println(stderr, "{}", ec.message());
+            throw std::system_error(ec);
+        }
+        // assert(m_res >= 0);
+        return m_res;
+    }
+
+    T value_unsafe() const {
+        assert(m_res >= 0);
+        return m_res;
+    }
 };
 
-std::error_category const &gai_category() {
-    static struct final : std::error_category {
-        char const *name() const noexcept override {
-            return "getaddrinfo";
-        }
-
-        std::string message(int err) const override {
-            return gai_strerror(err);
-        }
-    } instance;
-    return instance;
+template <class U, class T>
+expected<U> convert_error(T res) {
+    if (res == -1) {
+        return -errno;
+    }
+    return res;
 }
 
 [[noreturn]] void _throw_system_error(const char *what) {
@@ -61,9 +96,30 @@ T check_error(const char *what, T res) {
 
 #define SOURCE_INFO_IMPL_2(file, line) "In " file ":" #line ": "
 #define SOURCE_INFO_IMPL(file, line) SOURCE_INFO_IMPL_2(file, line)
-#define SOURCE_INFO() SOURCE_INFO_IMPL(__FILE__, __LINE__)
+#define SOURCE_INFO(...) SOURCE_INFO_IMPL(__FILE__, __LINE__) __VA_ARGS__
 #define CHECK_CALL_EXCEPT(except, func, ...) check_error<except>(SOURCE_INFO() #func, func(__VA_ARGS__))
-#define CHECK_CALL(func, ...) check_error(SOURCE_INFO() #func, func(__VA_ARGS__))
+#define CHECK_CALL(func, ...) check_error(SOURCE_INFO(#func), func(__VA_ARGS__))
+
+std::error_category const &gai_category() {
+    static struct final : std::error_category {
+        char const *name() const noexcept override {
+            return "getaddrinfo";
+        }
+
+        std::string message(int err) const override {
+            return gai_strerror(err);
+        }
+    } instance;
+    return instance;
+}
+
+struct no_move {
+    no_move() = default;
+    no_move(no_move &&) = delete;
+    no_move &operator=(no_move &&) = delete;
+    no_move(no_move const &) = delete;
+    no_move &operator=(no_move const &) = delete;
+};
 
 struct address_resolver {
     struct address_ref {
@@ -692,7 +748,38 @@ struct callback {
     }
 };
 
-int epollfd;
+struct io_context {
+    int m_epfd;
+
+    inline static thread_local io_context *g_instance = nullptr;
+
+    io_context() : m_epfd(CHECK_CALL(epoll_create1, 0)) {
+        g_instance = this;
+    }
+
+    void join() {
+        std::array<struct epoll_event, 128> events;
+        while (true) {
+            int ret = epoll_wait(m_epfd, events.data(), events.size(), -1);
+            if (ret < 0)
+                throw;
+            for (int i = 0; i < ret; ++i) {
+                auto cb = callback<>::from_address(events[i].data.ptr);
+                cb();
+            }
+        }
+    }
+
+    ~io_context() {
+        close(m_epfd);
+        g_instance = nullptr;
+    }
+
+    static io_context &get() {
+        assert(g_instance);
+        return *g_instance;
+    }
+};
 
 struct async_file {
     int m_fd = -1;
@@ -709,26 +796,14 @@ struct async_file {
         struct epoll_event event;
         event.events = EPOLLET;
         event.data.ptr = nullptr;
-        CHECK_CALL(epoll_ctl, epollfd, EPOLL_CTL_ADD, fd, &event);
+        CHECK_CALL(epoll_ctl, io_context::get().m_epfd, EPOLL_CTL_ADD, fd, &event);
 
         return async_file{fd};
     }
 
-    ssize_t sync_read(bytes_view buf) {
-        return CHECK_CALL(read, m_fd, buf.data(), buf.size());
-    }
-
-    ssize_t sync_write(bytes_const_view buf) {
-        return CHECK_CALL(write, m_fd, buf.data(), buf.size());
-    }
-
-    int sync_accept(address_resolver::address &addr) {
-        return CHECK_CALL(accept, m_fd, &addr.m_addr, &addr.m_addrlen);
-    }
-
-    void async_read(bytes_view buf, callback<ssize_t> cb) {
-        ssize_t ret = CHECK_CALL_EXCEPT(EAGAIN, read, m_fd, buf.data(), buf.size());
-        if (ret != -1) {
+    void async_read(bytes_view buf, callback<expected<size_t>> cb) {
+        auto ret = convert_error<size_t>(read(m_fd, buf.data(), buf.size()));
+        if (!ret.is_error(EAGAIN)) {
             cb(ret);
             return;
         }
@@ -741,12 +816,12 @@ struct async_file {
         struct epoll_event event;
         event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
         event.data.ptr = resume.leak_address();
-        epoll_ctl(epollfd, EPOLL_CTL_MOD, m_fd, &event);
+        CHECK_CALL(epoll_ctl, io_context::get().m_epfd, EPOLL_CTL_MOD, m_fd, &event);
     }
 
-    void async_write(bytes_const_view buf, callback<ssize_t> cb) {
-        ssize_t ret = CHECK_CALL_EXCEPT(EAGAIN, write, m_fd, buf.data(), buf.size());
-        if (ret != -1) {
+    void async_write(bytes_const_view buf, callback<expected<size_t>> cb) {
+        auto ret = convert_error<size_t>(write(m_fd, buf.data(), buf.size()));
+        if (!ret.is_error(EAGAIN)) {
             cb(ret);
             return;
         }
@@ -759,12 +834,12 @@ struct async_file {
         struct epoll_event event;
         event.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
         event.data.ptr = resume.leak_address();
-        epoll_ctl(epollfd, EPOLL_CTL_MOD, m_fd, &event);
+        CHECK_CALL(epoll_ctl, io_context::get().m_epfd, EPOLL_CTL_MOD, m_fd, &event);
     }
 
-    void async_accept(address_resolver::address &addr, callback<int> cb) {
-        ssize_t ret = CHECK_CALL_EXCEPT(EAGAIN, accept, m_fd, &addr.m_addr, &addr.m_addrlen);
-        if (ret != -1) {
+    void async_accept(address_resolver::address &addr, callback<expected<int>> cb) {
+        auto ret = convert_error<int>(accept(m_fd, &addr.m_addr, &addr.m_addrlen));
+        if (!ret.is_error(EAGAIN)) {
             cb(ret);
             return;
         }
@@ -777,7 +852,7 @@ struct async_file {
         struct epoll_event event;
         event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
         event.data.ptr = resume.leak_address();
-        CHECK_CALL(epoll_ctl, epollfd, EPOLL_CTL_MOD, m_fd, &event);
+        CHECK_CALL(epoll_ctl, io_context::get().m_epfd, EPOLL_CTL_MOD, m_fd, &event);
     }
 
     async_file(async_file &&that) noexcept : m_fd(that.m_fd) {
@@ -792,8 +867,8 @@ struct async_file {
     ~async_file() {
         if (m_fd == -1)
             return;
-        epoll_ctl(epollfd, EPOLL_CTL_DEL, m_fd, nullptr);
         close(m_fd);
+        epoll_ctl(io_context::get().m_epfd, EPOLL_CTL_DEL, m_fd, nullptr);
     }
 };
 
@@ -817,7 +892,11 @@ struct http_connection_handler : std::enable_shared_from_this<http_connection_ha
     void do_read() {
         // fmt::println("开始读取...");
         // 注意：TCP 基于流，可能粘包
-        return m_conn.async_read(m_readbuf, [self = this->shared_from_this()] (size_t n) {
+        return m_conn.async_read(m_readbuf, [self = this->shared_from_this()] (expected<size_t> ret) {
+            if (ret.error()) {
+                return;
+            }
+            size_t n = ret.value();
             // 如果读到 EOF，说明对面，关闭了连接
             if (n == 0) {
                 // fmt::println("收到对面关闭了连接");
@@ -860,7 +939,11 @@ struct http_connection_handler : std::enable_shared_from_this<http_connection_ha
     }
 
     void do_write(bytes_const_view buffer) {
-        return m_conn.async_write(buffer, [self = shared_from_this(), buffer] (size_t n) {
+        return m_conn.async_write(buffer, [self = shared_from_this(), buffer] (expected<size_t> ret) {
+            if (ret.error())
+                return;
+            auto n = ret.value();
+
             if (buffer.size() == n) {
                 self->m_res_writer.reset_state();
                 return self->do_read();
@@ -891,43 +974,30 @@ struct http_acceptor : std::enable_shared_from_this<http_acceptor> {
     }
 
     void do_accept() {
-        return m_listen.async_accept(m_addr, [self = shared_from_this()] (int connfd) {
-            fmt::println("接受了一个连接: {}", connfd);
+        return m_listen.async_accept(m_addr, [self = shared_from_this()] (expected<int> ret) {
+            auto connfd = ret.expect("accept");
 
+            // fmt::println("接受了一个连接: {}", connfd);
             http_connection_handler::make()->do_start(connfd);
-
             return self->do_accept();
         });
     }
 };
 
 void server() {
-    epollfd = epoll_create1(0);
-
+    io_context ctx;
     auto acceptor = http_acceptor::make();
     acceptor->do_start("127.0.0.1", "8080");
 
-    struct epoll_event events[10];
-    while (true) {
-        int ret = epoll_wait(epollfd, events, 1, -1);
-        if (ret < 0)
-            throw;
-        for (int i = 0; i < ret; ++i) {
-            auto cb = callback<>::from_address(events[i].data.ptr);
-            cb();
-        }
-    }
-    // fmt::println("所有任务都完毕了");
-
-    close(epollfd);
+    ctx.join();
 }
 
 int main() {
-    setlocale(LC_ALL, "zh_CN.UTF-8");
+    // setlocale(LC_ALL, "zh_CN.UTF-8");
     try {
         server();
     } catch (std::system_error const &e) {
-        fmt::println("错误: {} ({}.{})", e.what(), e.code().category().name(), e.code().value());
+        fmt::println("{} ({}/{})", e.what(), e.code().category().name(), e.code().value());
     }
     return 0;
 }
