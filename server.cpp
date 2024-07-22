@@ -10,6 +10,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <netdb.h>
+#include <thread>
 #include <type_traits>
 #include <unistd.h>
 #include <fmt/format.h>
@@ -652,6 +653,7 @@ struct callback {
     callback(F &&f) : m_base(std::make_unique<_callback_impl<std::decay_t<F>>>(std::forward<F>(f))) {}
 
     callback() = default;
+    callback(std::nullptr_t) noexcept {}
 
     callback(callback const &) = delete;
     callback &operator=(callback const &) = delete;
@@ -676,9 +678,94 @@ struct callback {
         cb.m_base = std::unique_ptr<_callback_base>(static_cast<_callback_base *>(addr));
         return cb;
     }
+
+    explicit operator bool() const noexcept {
+        return m_base != nullptr;
+    }
 };
 
-struct io_context {
+struct stop_source {
+    struct _control_block {
+        bool m_stop = false;
+        callback<> m_cb;
+    };
+
+    std::shared_ptr<_control_block> m_control;
+
+    stop_source() = default;
+
+    stop_source(std::in_place_t) : m_control(std::make_shared<_control_block>()) {}
+
+    bool stop_requested() const noexcept {
+        return m_control && m_control->m_stop;
+    }
+
+    bool stop_possible() const noexcept {
+        return m_control != nullptr;
+    }
+
+    void request_stop() const {
+        if (!m_control)
+            return;
+        m_control->m_stop = true;
+        if (m_control->m_cb) {
+            m_control->m_cb();
+            m_control->m_cb = nullptr;
+        }
+    }
+
+    void set_stop_callback(callback<> cb) const noexcept {
+        if (!m_control)
+            return;
+        assert(!m_control->m_cb);
+        m_control->m_cb = std::move(cb);
+    }
+
+    void clear_stop_callback() const noexcept {
+        if (!m_control)
+            return;
+        m_control->m_cb = nullptr;
+    }
+};
+
+struct timer_context {
+    struct _timer_entry {
+        callback<> m_cb;
+        stop_source m_stop;
+    };
+
+    std::multimap<std::chrono::steady_clock::time_point, _timer_entry> m_timer_heap;
+
+    void set_timeout(std::chrono::steady_clock::duration dt, callback<> cb, stop_source stop = {}) {
+        auto expire_time = std::chrono::steady_clock::now() + dt;
+        auto it = m_timer_heap.insert({expire_time, _timer_entry{std::move(cb), stop}});
+        stop.set_stop_callback([this, it] {
+            auto cb = std::move(it->second.m_cb);
+            m_timer_heap.erase(it);
+            cb();
+        });
+    }
+
+    std::chrono::steady_clock::duration duration_to_next_timer() {
+        while (!m_timer_heap.empty()) {
+            auto it = m_timer_heap.begin();
+            // 看看最近的一次计时器事件，是否已经过时？
+            auto now = std::chrono::steady_clock::now();
+            if (it->first <= now) {
+                // 如果已经过时，则触发该定时器的回调，并删除
+                it->second.m_stop.clear_stop_callback();
+                auto cb = std::move(it->second.m_cb);
+                m_timer_heap.erase(it);
+                cb();
+            } else {
+                return it->first - now;
+            }
+        }
+        return std::chrono::nanoseconds(-1);
+    }
+};
+
+struct io_context : timer_context {
     int m_epfd;
 
     inline static thread_local io_context *g_instance = nullptr;
@@ -690,9 +777,14 @@ struct io_context {
     void join() {
         std::array<struct epoll_event, 128> events;
         while (true) {
-            int ret = epoll_wait(m_epfd, events.data(), events.size(), -1);
-            if (ret < 0)
-                throw;
+            std::chrono::nanoseconds dt = duration_to_next_timer();
+            struct timespec timeout, *timeoutp = nullptr;
+            if (dt.count() > 0) {
+                timeout.tv_sec = dt.count() / 1'000'000'000;
+                timeout.tv_nsec = dt.count() % 1'000'000'000;
+                timeoutp = &timeout;
+            }
+            int ret = convert_error(epoll_pwait2(m_epfd, events.data(), events.size(), timeoutp, nullptr)).expect("epoll_pwait2");
             for (int i = 0; i < ret; ++i) {
                 auto cb = callback<>::from_address(events[i].data.ptr);
                 cb();
@@ -821,48 +913,55 @@ struct async_file : file_descriptor {
         convert_error(epoll_ctl(io_context::get().m_epfd, EPOLL_CTL_ADD, m_fd, &event)).expect("EPOLL_CTL_ADD");
     }
 
-    void _epoll_callback(callback<> &&resume, uint32_t events) {
+    void _epoll_callback(callback<> &&resume, uint32_t events, stop_source stop) {
         struct epoll_event event;
         event.events = events;
         event.data.ptr = resume.get_address();
         convert_error(epoll_ctl(io_context::get().m_epfd, EPOLL_CTL_MOD, m_fd, &event)).expect("EPOLL_CTL_MOD");
-        resume.leak_address();
+        stop.set_stop_callback([resume_ptr = resume.leak_address()] {
+            callback<>::from_address(resume_ptr)();
+        });
     }
 
-    void async_read(bytes_view buf, callback<expected<size_t>> cb) {
+    void async_read(bytes_view buf, callback<expected<size_t>> cb, stop_source stop = {}) {
+        if (stop.stop_requested()) {
+            stop.clear_stop_callback();
+            return cb(-ECANCELED);
+        }
         auto ret = convert_error<size_t>(read(m_fd, buf.data(), buf.size()));
         if (!ret.is_error(EAGAIN)) {
+            stop.clear_stop_callback();
             return cb(ret);
         }
 
         // 如果 read 可以读了，请操作系统，调用，我这个回调
-        return _epoll_callback([this, buf, cb = std::move(cb)] () mutable {
-            return async_read(buf, std::move(cb));
-        }, EPOLLIN | EPOLLET | EPOLLONESHOT);
+        return _epoll_callback([this, buf, cb = std::move(cb), stop] () mutable {
+            return async_read(buf, std::move(cb), stop);
+        }, EPOLLIN | EPOLLET | EPOLLONESHOT, stop);
     }
 
-    void async_write(bytes_const_view buf, callback<expected<size_t>> cb) {
+    void async_write(bytes_const_view buf, callback<expected<size_t>> cb, stop_source stop = {}) {
         auto ret = convert_error<size_t>(write(m_fd, buf.data(), buf.size()));
         if (!ret.is_error(EAGAIN)) {
             return cb(ret);
         }
 
         // 如果 write 可以写了，请操作系统，调用，我这个回调
-        return _epoll_callback([this, buf, cb = std::move(cb)] () mutable {
-            return async_write(buf, std::move(cb));
-        }, EPOLLOUT | EPOLLET | EPOLLONESHOT);
+        return _epoll_callback([this, buf, cb = std::move(cb), stop] () mutable {
+            return async_write(buf, std::move(cb), stop);
+        }, EPOLLOUT | EPOLLET | EPOLLONESHOT, stop);
     }
 
-    void async_accept(address_resolver::address &addr, callback<expected<int>> cb) {
+    void async_accept(address_resolver::address &addr, callback<expected<int>> cb, stop_source stop = {}) {
         auto ret = convert_error<int>(accept(m_fd, &addr.m_addr, &addr.m_addrlen));
         if (!ret.is_error(EAGAIN)) {
             return cb(ret);
         }
 
         // 如果 accept 到请求了，请操作系统，调用，我这个回调
-        return _epoll_callback([this, &addr, cb = std::move(cb)] () mutable {
-            return async_accept(addr, std::move(cb));
-        }, EPOLLIN | EPOLLET | EPOLLONESHOT);
+        return _epoll_callback([this, &addr, cb = std::move(cb), stop] () mutable {
+            return async_accept(addr, std::move(cb), stop);
+        }, EPOLLIN | EPOLLET | EPOLLONESHOT, stop);
     }
 
     async_file(async_file &&) = default;
@@ -893,19 +992,28 @@ struct http_connection_handler : std::enable_shared_from_this<http_connection_ha
     }
 
     void do_read() {
-        // fmt::println("开始读取...");
         // 注意：TCP 基于流，可能粘包
-        return m_conn.async_read(m_readbuf, [self = this->shared_from_this()] (expected<size_t> ret) {
+        fmt::println("开始读取...");
+        // 设置一个 3 秒的定时器，若 3 秒内没有读到任何请求，则视为对方放弃，关闭连接
+        stop_source stop_io(std::in_place);
+        stop_source stop_timer(std::in_place);
+        io_context::get().set_timeout(std::chrono::seconds(3), [stop_io] {
+            stop_io.request_stop(); // 定时器先完成时，取消读取
+        }, stop_timer);
+        // 开始读取
+        return m_conn.async_read(m_readbuf, [self = this->shared_from_this(), stop_timer] (expected<size_t> ret) {
+            stop_timer.request_stop(); // 读取先完成时，取消定时器
             if (ret.error()) {
+                fmt::println("读取出错 {}，放弃连接", strerror(-ret.error()));
                 return;
             }
             size_t n = ret.value();
             // 如果读到 EOF，说明对面，关闭了连接
             if (n == 0) {
-                // fmt::println("收到对面关闭了连接");
+                fmt::println("对面关闭了连接");
                 return;
             }
-            // fmt::println("读取到了 {} 个字节: {}", n, std::string_view{m_buf.data(), n});
+            fmt::println("读取到了 {} 个字节: {}", n, std::string_view{self->m_readbuf.data(), n});
             // 成功读取，则推入解析
             self->m_req_parser.push_chunk(self->m_readbuf.subspan(0, n));
             if (!self->m_req_parser.request_finished()) {
@@ -913,7 +1021,7 @@ struct http_connection_handler : std::enable_shared_from_this<http_connection_ha
             } else {
                 return self->do_handle();
             }
-        });
+        }, stop_io);
     }
 
     void do_handle() {
@@ -935,7 +1043,7 @@ struct http_connection_handler : std::enable_shared_from_this<http_connection_ha
 
         // fmt::println("我的响应头: {}", buffer);
         // fmt::println("我的响应正文: {}", body);
-        // fmt::println("正在响应");
+        fmt::println("正在响应");
 
         m_res_writer.write_body(body);
         return do_write(m_res_writer.buffer());
@@ -968,7 +1076,7 @@ struct http_acceptor : std::enable_shared_from_this<http_acceptor> {
 
     void do_start(std::string name, std::string port) {
         address_resolver resolver;
-        fmt::println("正在监听：{}:{}", name, port);
+        fmt::println("正在监听：http://{}:{}", name, port);
         auto entry = resolver.resolve(name, port);
         int listenfd = entry.create_socket_and_bind();
 
@@ -980,7 +1088,7 @@ struct http_acceptor : std::enable_shared_from_this<http_acceptor> {
         return m_listen.async_accept(m_addr, [self = shared_from_this()] (expected<int> ret) {
             auto connfd = ret.expect("accept");
 
-            // fmt::println("接受了一个连接: {}", connfd);
+            fmt::println("接受了一个连接: {}", connfd);
             http_connection_handler::make()->do_start(connfd);
             return self->do_accept();
         });
