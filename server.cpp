@@ -420,7 +420,6 @@ struct stop_source {
         if (!m_control) {
             return;
         }
-        assert(!m_control->m_cb);
         m_control->m_cb = std::move(cb);
     }
 
@@ -438,11 +437,11 @@ struct timer_context {
         stop_source m_stop;
     };
 
-    timer_context() = default;
-    timer_context(timer_context &&) = delete;
-
     std::multimap<std::chrono::steady_clock::time_point, _timer_entry>
         m_timer_heap;
+
+    timer_context() = default;
+    timer_context(timer_context &&) = delete;
 
     void set_timeout(std::chrono::steady_clock::duration dt, callback<> cb,
                      stop_source stop = {}) {
@@ -517,7 +516,7 @@ struct io_context : timer_context {
         g_instance = nullptr;
     }
 
-    static io_context &get() {
+    [[gnu::const]] static io_context &get() {
         assert(g_instance);
         return *g_instance;
     }
@@ -648,6 +647,20 @@ struct async_file : file_descriptor {
 
     void async_read(bytes_view buf, callback<expected<size_t>> cb,
                     stop_source stop = {}) {
+#if USE_LEVEL_TRIGGER
+        // 如果 read 可以读了，请操作系统，调用，我这个回调
+        return _epoll_callback(
+            [this, buf, cb = std::move(cb), stop]() mutable {
+                if (stop.stop_requested()) {
+                    stop.clear_stop_callback();
+                    return cb(-ECANCELED);
+                }
+                auto ret = convert_error<size_t>(read(m_fd, buf.data(), buf.size()));
+                stop.clear_stop_callback();
+                return cb(ret);
+            },
+            EPOLLIN | EPOLLERR | EPOLLONESHOT, stop);
+#else
         if (stop.stop_requested()) {
             stop.clear_stop_callback();
             return cb(-ECANCELED);
@@ -664,10 +677,24 @@ struct async_file : file_descriptor {
                 return async_read(buf, std::move(cb), stop);
             },
             EPOLLIN | EPOLLERR | EPOLLET | EPOLLONESHOT, stop);
+#endif
     }
 
     void async_write(bytes_const_view buf, callback<expected<size_t>> cb,
                      stop_source stop = {}) {
+#if USE_LEVEL_TRIGGER
+        // 如果 write 可以写了，请操作系统，调用，我这个回调
+        return _epoll_callback(
+            [this, buf, cb = std::move(cb), stop]() mutable {
+                if (stop.stop_requested()) {
+                    stop.clear_stop_callback();
+                    return cb(-ECANCELED);
+                }
+                auto ret = convert_error<size_t>(write(m_fd, buf.data(), buf.size()));
+                return cb(ret);
+            },
+            EPOLLOUT | EPOLLERR | EPOLLONESHOT, stop);
+#else
         if (stop.stop_requested()) {
             stop.clear_stop_callback();
             return cb(-ECANCELED);
@@ -684,10 +711,24 @@ struct async_file : file_descriptor {
                 return async_write(buf, std::move(cb), stop);
             },
             EPOLLOUT | EPOLLERR | EPOLLET | EPOLLONESHOT, stop);
+#endif
     }
 
     void async_accept(address_resolver::address &addr,
                       callback<expected<int>> cb, stop_source stop = {}) {
+#if USE_LEVEL_TRIGGER
+        // 如果 accept 到请求了，请操作系统，调用，我这个回调
+        return _epoll_callback(
+            [this, &addr, cb = std::move(cb), stop]() mutable {
+                if (stop.stop_requested()) {
+                    stop.clear_stop_callback();
+                    return cb(-ECANCELED);
+                }
+                auto ret = convert_error<int>(accept(m_fd, &addr.m_addr, &addr.m_addrlen));
+                return cb(ret);
+            },
+            EPOLLIN | EPOLLERR | EPOLLONESHOT, stop);
+#else
         if (stop.stop_requested()) {
             stop.clear_stop_callback();
             return cb(-ECANCELED);
@@ -705,6 +746,7 @@ struct async_file : file_descriptor {
                 return async_accept(addr, std::move(cb), stop);
             },
             EPOLLIN | EPOLLERR | EPOLLET | EPOLLONESHOT, stop);
+#endif
     }
 
     void async_connect(address_resolver::address_info const &addr,
@@ -1120,7 +1162,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
             if (it != m_routes.end()) {
                 return it->second(request);
             }
-            fmt::println("找不到路径: {}", request.url);
+            // fmt::println("找不到路径: {}", request.url);
             return request.write_response(404, "404 Not Found");
         }
     };
@@ -1147,7 +1189,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
 
         void do_read() {
             // 注意：TCP 基于流，可能粘包
-            fmt::println("开始读取...");
+            // fmt::println("开始读取...");
             // 设置一个 3 秒的定时器，若 3
             // 秒内没有读到任何请求，则视为对方放弃，关闭连接
             stop_source stop_io(std::in_place);
@@ -1165,18 +1207,16 @@ struct http_server : std::enable_shared_from_this<http_server> {
                  stop_timer](expected<size_t> ret) {
                     stop_timer.request_stop(); // 读取先完成时，取消定时器
                     if (ret.error()) {
-                        fmt::println("读取出错 {}，放弃连接",
-                                     strerror(-ret.error()));
+                        // fmt::println("读取出错 {}，放弃连接", strerror(-ret.error()));
                         return;
                     }
                     size_t n = ret.value();
                     // 如果读到 EOF，说明对面，关闭了连接
                     if (n == 0) {
-                        fmt::println("对面关闭了连接");
+                        // fmt::println("对面关闭了连接");
                         return;
                     }
-                    fmt::println("读取到了 {} 个字节: {}", n,
-                                 std::string_view{self->m_readbuf.data(), n});
+                    // fmt::println("读取到了 {} 个字节: {}", n, std::string_view{self->m_readbuf.data(), n});
                     // 成功读取，则推入解析
                     self->m_req_parser.push_chunk(
                         self->m_readbuf.subspan(0, n));
@@ -1200,7 +1240,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
 
             // fmt::println("我的响应头: {}", buffer);
             // fmt::println("我的响应正文: {}", body);
-            fmt::println("正在响应");
+            // fmt::println("正在响应");
             m_router->do_handle(request);
             return do_write(m_res_writer.buffer());
         }
@@ -1209,7 +1249,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
             return m_conn.async_write(buffer, [self = shared_from_this(),
                                                buffer](expected<size_t> ret) {
                 if (ret.error()) {
-                    fmt::println("写入错误，放弃连接");
+                    // fmt::println("写入错误，放弃连接");
                     return;
                 }
                 auto n = ret.value();
@@ -1244,30 +1284,12 @@ struct http_server : std::enable_shared_from_this<http_server> {
                                                     expected<int> ret) {
             auto connfd = ret.expect("accept");
 
-            fmt::println("接受了一个连接: {}", connfd);
+            // fmt::println("接受了一个连接: {}", connfd);
             http_connection_handler::make()->do_start(&self->m_router, connfd);
             return self->do_accept();
         });
     }
 };
-
-void server() {
-    io_context ctx;
-    auto acceptor = http_server::make();
-    acceptor->get_router().route("/", [](http_server::http_request &request) {
-        std::string response;
-        if (request.body.empty()) {
-            response = "你好，你的请求正文为空哦";
-        } else {
-            response = fmt::format("你好，你的请求是: [{}]，共 {} 字节",
-                                   request.body, request.body.size());
-        }
-        request.write_response(200, response);
-    });
-    acceptor->do_start("127.0.0.1", "8080");
-
-    ctx.join();
-}
 
 struct http_client : std::enable_shared_from_this<http_client> {
     using pointer = std::shared_ptr<http_client>;
@@ -1353,13 +1375,12 @@ struct http_client : std::enable_shared_from_this<http_client> {
             m_stop = stop;
             m_request = std::move(request);
             if (m_conn) {
-                fmt::println("复用现有连接");
+                // fmt::println("复用现有连接");
                 do_compose();
                 return;
             }
             m_parsed_url = std::move(parsed_url);
-            fmt::println("连接到 {}，服务 {}，路径 {}", m_parsed_url.m_hostname,
-                         m_parsed_url.m_scheme, m_request.url);
+            // fmt::println("连接到 {}，服务 {}，路径 {}", m_parsed_url.m_hostname, m_parsed_url.m_scheme, m_request.url);
             // "http://142857.red/" 变成
             // m_hostname = "142857.red";
             // m_scheme = "http";
@@ -1367,12 +1388,12 @@ struct http_client : std::enable_shared_from_this<http_client> {
             address_resolver res;
             auto addr = _resolve_address(res);
             m_conn = async_file{addr.create_socket()};
-            fmt::println("开始连接...");
+            // fmt::println("开始连接...");
             return m_conn.async_connect(
                 addr,
                 [self = shared_from_this()](expected<int> ret) mutable {
                     ret.expect("connect");
-                    fmt::println("连接成功...");
+                    // fmt::println("连接成功...");
                     self->do_compose();
                 },
                 m_stop);
@@ -1392,7 +1413,7 @@ struct http_client : std::enable_shared_from_this<http_client> {
                 m_req_writer.write_body(m_request.body);
             }
             http_response response;
-            fmt::println("正在写入请求...");
+            // fmt::println("正在写入请求...");
             return do_write(m_req_writer.buffer());
         }
 
@@ -1404,10 +1425,10 @@ struct http_client : std::enable_shared_from_this<http_client> {
                         return self->m_cb(ret.error(), {});
                     }
                     auto n = ret.value();
-                    fmt::println("写入 {} 字节", n);
+                    // fmt::println("写入 {} 字节", n);
 
                     if (buffer.size() == n) {
-                        fmt::println("写入请求成功，开始读取");
+                        // fmt::println("写入请求成功，开始读取");
                         self->m_req_writer.reset_state();
                         return self->do_read();
                     }
@@ -1422,18 +1443,16 @@ struct http_client : std::enable_shared_from_this<http_client> {
                 m_readbuf,
                 [self = this->shared_from_this()](expected<size_t> ret) {
                     if (ret.error()) {
-                        fmt::println("读取出错 {}，放弃连接",
-                                     strerror(-ret.error()));
+                        // fmt::println("读取出错 {}，放弃连接", strerror(-ret.error()));
                         return self->m_cb(ret.error(), {});
                     }
                     size_t n = ret.value();
                     // 如果读到 EOF，说明对面，关闭了连接
                     if (n == 0) {
-                        fmt::println("对面关闭了连接");
+                        // fmt::println("对面关闭了连接");
                         return;
                     }
-                    fmt::println("读取到了 {} 个字节: {}", n,
-                                 std::string_view{self->m_readbuf.data(), n});
+                    // fmt::println("读取到了 {} 个字节: {}", n, std::string_view{self->m_readbuf.data(), n});
                     // 成功读取，则推入解析
                     self->m_res_parser.push_chunk(
                         self->m_readbuf.subspan(0, n));
@@ -1482,6 +1501,24 @@ struct http_client : std::enable_shared_from_this<http_client> {
     }
 };
 
+void server() {
+    io_context ctx;
+    auto acceptor = http_server::make();
+    acceptor->get_router().route("/", [](http_server::http_request &request) {
+        std::string response;
+        if (request.body.empty()) {
+            response = "你好，你的请求正文为空哦";
+        } else {
+            response = fmt::format("你好，你的请求是: [{}]，共 {} 字节",
+                                   request.body, request.body.size());
+        }
+        request.write_response(200, response);
+    });
+    acceptor->do_start("127.0.0.1", "8080");
+
+    ctx.join();
+}
+
 void client() {
     io_context ctx;
     auto client = http_client::make();
@@ -1510,7 +1547,7 @@ void client() {
 int main() {
     // setlocale(LC_ALL, "zh_CN.UTF-8");
     try {
-        client();
+        server();
     } catch (std::system_error const &e) {
         fmt::println("{} ({}/{})", e.what(), e.code().category().name(),
                      e.code().value());
