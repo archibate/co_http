@@ -13,12 +13,11 @@
 #include <type_traits>
 #include <unistd.h>
 #include <fmt/format.h>
-#include <string.h>
 #include <utility>
 #include <vector>
 
 template <class T>
-struct expected {
+struct [[nodiscard]] expected {
     std::make_signed_t<T> m_res;
 
     expected() = default;
@@ -26,7 +25,7 @@ struct expected {
 
     int error() const noexcept {
         if (m_res < 0) {
-            return -m_res;
+            return m_res;
         }
         return 0;
     }
@@ -61,8 +60,7 @@ struct expected {
         return m_res;
     }
 
-    T value_unsafe() const {
-        assert(m_res >= 0);
+    T raw_value() const {
         return m_res;
     }
 };
@@ -75,30 +73,38 @@ expected<U> convert_error(T res) {
     return res;
 }
 
-[[noreturn]] void _throw_system_error(const char *what) {
-    auto ec = std::error_code(errno, std::system_category());
-    fmt::println(stderr, "{}: {} ({}.{})", what, ec.message(), ec.category().name(), ec.value());
-    throw std::system_error(ec, what);
-}
-
-template <int Except = 0, class T>
-T check_error(const char *what, T res) {
+template <int = 0, class T>
+expected<T> convert_error(T res) {
     if (res == -1) {
-        if constexpr (Except != 0) {
-            if (errno == Except) {
-                return -1;
-            }
-        }
-        _throw_system_error(what);
+        return -errno;
     }
     return res;
 }
 
-#define SOURCE_INFO_IMPL_2(file, line) "In " file ":" #line ": "
-#define SOURCE_INFO_IMPL(file, line) SOURCE_INFO_IMPL_2(file, line)
-#define SOURCE_INFO(...) SOURCE_INFO_IMPL(__FILE__, __LINE__) __VA_ARGS__
-#define CHECK_CALL_EXCEPT(except, func, ...) check_error<except>(SOURCE_INFO() #func, func(__VA_ARGS__))
-#define CHECK_CALL(func, ...) check_error(SOURCE_INFO(#func), func(__VA_ARGS__))
+// [[noreturn]] void _throw_system_error(const char *what) {
+//     auto ec = std::error_code(errno, std::system_category());
+//     fmt::println(stderr, "{}: {} ({}.{})", what, ec.message(), ec.category().name(), ec.value());
+//     throw std::system_error(ec, what);
+// }
+//
+// template <int Except = 0, class T>
+// T check_error(const char *what, T res) {
+//     if (res == -1) {
+//         if constexpr (Except != 0) {
+//             if (errno == Except) {
+//                 return -1;
+//             }
+//         }
+//         _throw_system_error(what);
+//     }
+//     return res;
+// }
+
+// #define SOURCE_INFO_IMPL_2(file, line) "In " file ":" #line ": "
+// #define SOURCE_INFO_IMPL(file, line) SOURCE_INFO_IMPL_2(file, line)
+// #define SOURCE_INFO(...) SOURCE_INFO_IMPL(__FILE__, __LINE__) __VA_ARGS__
+// #define CHECK_CALL_EXCEPT(except, func, ...) check_error<except>(SOURCE_INFO() #func, func(__VA_ARGS__))
+// #define CHECK_CALL(func, ...) check_error(SOURCE_INFO(#func), func(__VA_ARGS__))
 
 std::error_category const &gai_category() {
     static struct final : std::error_category {
@@ -119,80 +125,6 @@ struct no_move {
     no_move &operator=(no_move &&) = delete;
     no_move(no_move const &) = delete;
     no_move &operator=(no_move const &) = delete;
-};
-
-struct address_resolver {
-    struct address_ref {
-        struct sockaddr *m_addr;
-        socklen_t m_addrlen;
-    };
-
-    struct address {
-        union {
-            struct sockaddr m_addr;
-            struct sockaddr_storage m_addr_storage;
-        };
-        socklen_t m_addrlen = sizeof(struct sockaddr_storage);
-
-        operator address_ref() {
-            return {&m_addr, m_addrlen};
-        }
-    };
-
-    struct address_info {
-        struct addrinfo *m_curr = nullptr;
-
-        address_ref get_address() const {
-            return {m_curr->ai_addr, m_curr->ai_addrlen};
-        }
-
-        int create_socket() const {
-            int sockfd = CHECK_CALL(socket, m_curr->ai_family, m_curr->ai_socktype, m_curr->ai_protocol);
-            return sockfd;
-        }
-
-        int create_socket_and_bind() const {
-            int sockfd = create_socket();
-            address_ref serve_addr = get_address();
-            int on = 1;
-            setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-            setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
-            CHECK_CALL(bind, sockfd, serve_addr.m_addr, serve_addr.m_addrlen);
-            CHECK_CALL(listen, sockfd, SOMAXCONN);
-            return sockfd;
-        }
-
-        [[nodiscard]] bool next_entry() {
-            m_curr = m_curr->ai_next;
-            if (m_curr == nullptr) {
-                return false;
-            }
-            return true;
-        }
-    };
-
-    struct addrinfo *m_head = nullptr;
-
-    address_info resolve(std::string const &name, std::string const &service) {
-        int err = getaddrinfo(name.c_str(), service.c_str(), NULL, &m_head);
-        if (err != 0) {
-            auto ec = std::error_code(err, gai_category());
-            throw std::system_error(ec, name + ":" + service);
-        }
-        return {m_head};
-    }
-
-    address_resolver() = default;
-
-    address_resolver(address_resolver &&that) : m_head(that.m_head) {
-        that.m_head = nullptr;
-    }
-
-    ~address_resolver() {
-        if (m_head) {
-            freeaddrinfo(m_head);
-        }
-    }
 };
 
 using string_map = std::map<std::string, std::string>;
@@ -731,17 +663,15 @@ struct callback {
         return m_base->_call(std::forward<Args>(args)...);
     }
 
-    template <class F>
-    F &target() const {
-        assert(m_base);
-        return static_cast<_callback_impl<F> &>(*m_base);
+    void *get_address() const noexcept {
+        return static_cast<void *>(m_base.get());
     }
 
-    void *leak_address() {
+    void *leak_address() noexcept {
         return static_cast<void *>(m_base.release());
     }
 
-    static callback from_address(void *addr) {
+    static callback from_address(void *addr) noexcept {
         callback cb;
         cb.m_base = std::unique_ptr<_callback_base>(static_cast<_callback_base *>(addr));
         return cb;
@@ -753,7 +683,7 @@ struct io_context {
 
     inline static thread_local io_context *g_instance = nullptr;
 
-    io_context() : m_epfd(CHECK_CALL(epoll_create1, 0)) {
+    io_context() : m_epfd(convert_error(epoll_create1(0)).expect("epoll_create")) {
         g_instance = this;
     }
 
@@ -781,93 +711,166 @@ struct io_context {
     }
 };
 
-struct async_file {
+struct file_descriptor {
     int m_fd = -1;
 
+    file_descriptor() = default;
+
+    explicit file_descriptor(int fd) : m_fd(fd) {}
+
+    file_descriptor(file_descriptor &&that) noexcept : m_fd(that.m_fd) {
+        that.m_fd = -1;
+    }
+
+    file_descriptor &operator=(file_descriptor &&that) noexcept {
+        std::swap(m_fd, that.m_fd);
+        return *this;
+    }
+
+    ~file_descriptor() {
+        if (m_fd == -1)
+            return;
+        close(m_fd);
+    }
+};
+
+struct address_resolver {
+    struct address_ref {
+        struct sockaddr *m_addr;
+        socklen_t m_addrlen;
+    };
+
+    struct address {
+        union {
+            struct sockaddr m_addr;
+            struct sockaddr_storage m_addr_storage;
+        };
+        socklen_t m_addrlen = sizeof(struct sockaddr_storage);
+
+        operator address_ref() {
+            return {&m_addr, m_addrlen};
+        }
+    };
+
+    struct address_info {
+        struct addrinfo *m_curr = nullptr;
+
+        address_ref get_address() const {
+            return {m_curr->ai_addr, m_curr->ai_addrlen};
+        }
+
+        int create_socket() const {
+            return convert_error(socket(m_curr->ai_family, m_curr->ai_socktype, m_curr->ai_protocol)).expect("socket");
+        }
+
+        int create_socket_and_bind() const {
+            auto sockfd = create_socket();
+            address_ref serve_addr = get_address();
+            int on = 1;
+            setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+            setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &on, sizeof(on));
+            convert_error(bind(sockfd, serve_addr.m_addr, serve_addr.m_addrlen)).expect("bind");
+            convert_error(listen(sockfd, SOMAXCONN)).expect("listen");
+            return sockfd;
+        }
+
+        [[nodiscard]] bool next_entry() {
+            m_curr = m_curr->ai_next;
+            if (m_curr == nullptr) {
+                return false;
+            }
+            return true;
+        }
+    };
+
+    struct addrinfo *m_head = nullptr;
+
+    address_info resolve(std::string const &name, std::string const &service) {
+        int err = getaddrinfo(name.c_str(), service.c_str(), NULL, &m_head);
+        if (err != 0) {
+            auto ec = std::error_code(err, gai_category());
+            throw std::system_error(ec, name + ":" + service);
+        }
+        return {m_head};
+    }
+
+    address_resolver() = default;
+
+    address_resolver(address_resolver &&that) : m_head(that.m_head) {
+        that.m_head = nullptr;
+    }
+
+    ~address_resolver() {
+        if (m_head) {
+            freeaddrinfo(m_head);
+        }
+    }
+};
+
+struct async_file : file_descriptor {
     async_file() = default;
 
-    explicit async_file(int fd) : m_fd(fd) {}
-
-    static async_file async_wrap(int fd) {
-        int flags = CHECK_CALL(fcntl, fd, F_GETFL);
+    explicit async_file(int fd) : file_descriptor(fd) {
+        int flags = convert_error(fcntl(m_fd, F_GETFL)).expect("F_GETFL");
         flags |= O_NONBLOCK;
-        CHECK_CALL(fcntl, fd, F_SETFL, flags);
+        convert_error(fcntl(m_fd, F_SETFL, flags)).expect("F_SETFL");
 
         struct epoll_event event;
         event.events = EPOLLET;
         event.data.ptr = nullptr;
-        CHECK_CALL(epoll_ctl, io_context::get().m_epfd, EPOLL_CTL_ADD, fd, &event);
+        convert_error(epoll_ctl(io_context::get().m_epfd, EPOLL_CTL_ADD, m_fd, &event)).expect("EPOLL_CTL_ADD");
+    }
 
-        return async_file{fd};
+    void _epoll_callback(callback<> &&resume, uint32_t events) {
+        struct epoll_event event;
+        event.events = events;
+        event.data.ptr = resume.get_address();
+        convert_error(epoll_ctl(io_context::get().m_epfd, EPOLL_CTL_MOD, m_fd, &event)).expect("EPOLL_CTL_MOD");
+        resume.leak_address();
     }
 
     void async_read(bytes_view buf, callback<expected<size_t>> cb) {
         auto ret = convert_error<size_t>(read(m_fd, buf.data(), buf.size()));
         if (!ret.is_error(EAGAIN)) {
-            cb(ret);
-            return;
+            return cb(ret);
         }
 
         // 如果 read 可以读了，请操作系统，调用，我这个回调
-        callback<> resume = [this, buf, cb = std::move(cb)] () mutable {
+        return _epoll_callback([this, buf, cb = std::move(cb)] () mutable {
             return async_read(buf, std::move(cb));
-        };
-
-        struct epoll_event event;
-        event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-        event.data.ptr = resume.leak_address();
-        CHECK_CALL(epoll_ctl, io_context::get().m_epfd, EPOLL_CTL_MOD, m_fd, &event);
+        }, EPOLLIN | EPOLLET | EPOLLONESHOT);
     }
 
     void async_write(bytes_const_view buf, callback<expected<size_t>> cb) {
         auto ret = convert_error<size_t>(write(m_fd, buf.data(), buf.size()));
         if (!ret.is_error(EAGAIN)) {
-            cb(ret);
-            return;
+            return cb(ret);
         }
 
         // 如果 write 可以写了，请操作系统，调用，我这个回调
-        callback<> resume = [this, buf, cb = std::move(cb)] () mutable {
+        return _epoll_callback([this, buf, cb = std::move(cb)] () mutable {
             return async_write(buf, std::move(cb));
-        };
-
-        struct epoll_event event;
-        event.events = EPOLLOUT | EPOLLET | EPOLLONESHOT;
-        event.data.ptr = resume.leak_address();
-        CHECK_CALL(epoll_ctl, io_context::get().m_epfd, EPOLL_CTL_MOD, m_fd, &event);
+        }, EPOLLOUT | EPOLLET | EPOLLONESHOT);
     }
 
     void async_accept(address_resolver::address &addr, callback<expected<int>> cb) {
         auto ret = convert_error<int>(accept(m_fd, &addr.m_addr, &addr.m_addrlen));
         if (!ret.is_error(EAGAIN)) {
-            cb(ret);
-            return;
+            return cb(ret);
         }
 
         // 如果 accept 到请求了，请操作系统，调用，我这个回调
-        callback<> resume = [this, &addr, cb = std::move(cb)] () mutable {
+        return _epoll_callback([this, &addr, cb = std::move(cb)] () mutable {
             return async_accept(addr, std::move(cb));
-        };
-
-        struct epoll_event event;
-        event.events = EPOLLIN | EPOLLET | EPOLLONESHOT;
-        event.data.ptr = resume.leak_address();
-        CHECK_CALL(epoll_ctl, io_context::get().m_epfd, EPOLL_CTL_MOD, m_fd, &event);
+        }, EPOLLIN | EPOLLET | EPOLLONESHOT);
     }
 
-    async_file(async_file &&that) noexcept : m_fd(that.m_fd) {
-        that.m_fd = -1;
-    }
-
-    async_file &operator=(async_file &&that) noexcept {
-        std::swap(m_fd, that.m_fd);
-        return *this;
-    }
+    async_file(async_file &&) = default;
+    async_file &operator=(async_file &&) = default;
 
     ~async_file() {
         if (m_fd == -1)
             return;
-        close(m_fd);
         epoll_ctl(io_context::get().m_epfd, EPOLL_CTL_DEL, m_fd, nullptr);
     }
 };
@@ -885,7 +888,7 @@ struct http_connection_handler : std::enable_shared_from_this<http_connection_ha
     }
 
     void do_start(int connfd) {
-        m_conn = async_file::async_wrap(connfd);
+        m_conn = async_file{connfd};
         return do_read();
     }
 
@@ -969,7 +972,7 @@ struct http_acceptor : std::enable_shared_from_this<http_acceptor> {
         auto entry = resolver.resolve(name, port);
         int listenfd = entry.create_socket_and_bind();
 
-        m_listen = async_file::async_wrap(listenfd);
+        m_listen = async_file{listenfd};
         return do_accept();
     }
 
