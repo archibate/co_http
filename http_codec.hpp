@@ -216,7 +216,7 @@ struct _http_base_parser {
 };
 
 enum class http_method {
-    UNKNOWN,
+    UNKNOWN = -1,
     GET,
     POST,
     PUT,
@@ -228,32 +228,13 @@ enum class http_method {
     CONNECT,
 };
 
-struct http_url {
-    std::string m_str;
-
-    http_url(std::string str) : m_str(std::move(str)) {
-    }
-
-    std::string const &str() const & {
-        return m_str;
-    }
-
-    std::string &str() & {
-        return m_str;
-    }
-
-    std::string &&str() && {
-        return std::move(m_str);
-    }
-};
-
 template <class HeaderParser = http11_header_parser>
 struct http_request_parser : _http_base_parser<HeaderParser> {
     http_method method() {
         return parse_enum<http_method>(this->_headline_first());
     }
 
-    http_url url() {
+    std::string url() {
         return this->_headline_second();
     }
 };

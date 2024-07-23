@@ -16,7 +16,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
     }
 
     struct http_request {
-        http_url url;
+        std::string url;
         http_method method; // GET, POST, PUT, ...
         std::string body;
 
@@ -46,7 +46,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
 
         void do_handle(http_request &request) {
             // 寻找匹配的路径
-            auto it = m_routes.find(request.url.str());
+            auto it = m_routes.find(request.url);
             if (it != m_routes.end()) {
                 return it->second(request);
             }

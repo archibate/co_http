@@ -75,13 +75,13 @@ constexpr std::string_view dump_enum(E value) {
 }
 
 template <class E, size_t ...Is>
-constexpr E _parse_enum_impl(E value, std::index_sequence<Is...>) {
+constexpr E _parse_enum_impl(std::string_view name, std::index_sequence<Is...>) {
     size_t ret = static_cast<size_t>(-1);
-    (void)((value == static_cast<E>(Is) && (ret = Is)) || ...);
+    (void)((name == _enum_value_name<static_cast<E>(Is)>() && (ret = Is)) || ...);
     return static_cast<E>(ret);
 }
 
 template <class E>
 constexpr E parse_enum(std::string_view name) {
-    return _parse_enum_impl(name, std::make_index_sequence<_enum_range<E>()>());
+    return _parse_enum_impl<E>(name, std::make_index_sequence<_enum_range<E>()>());
 }
