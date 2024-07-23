@@ -43,7 +43,7 @@ struct callback {
     callback(callback &&) = default;
     callback &operator=(callback &&) = default;
 
-    void operator()(Args... args) const {
+    void operator()(Args... args) {
         assert(m_base);
         m_base->_call(std::forward<Args>(args)...);
         m_base = nullptr; // 所有回调，只能调用一次
