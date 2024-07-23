@@ -21,6 +21,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
         std::string body;
 
         http_response_writer<> *m_res_writer = nullptr;
+        callback<> m_resume;
 
         void write_response(
             int status, std::string_view content,
@@ -33,6 +34,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
                                        std::to_string(content.size()));
             m_res_writer->end_header();
             m_res_writer->write_body(content);
+            m_resume();
         }
     };
 
@@ -123,6 +125,9 @@ struct http_server : std::enable_shared_from_this<http_server> {
                 m_req_parser.method(),
                 std::move(m_req_parser.body()),
                 &m_res_writer,
+                [self = shared_from_this()] {
+                    self->do_write(self->m_res_writer.buffer());
+                },
             };
             m_req_parser.reset_state();
 
@@ -130,7 +135,6 @@ struct http_server : std::enable_shared_from_this<http_server> {
             // fmt::println("我的响应正文: {}", body);
             // fmt::println("正在响应");
             m_router->do_handle(request);
-            return do_write(m_res_writer.buffer());
         }
 
         void do_write(bytes_const_view buffer) {

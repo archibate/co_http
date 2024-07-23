@@ -45,7 +45,8 @@ struct callback {
 
     void operator()(Args... args) const {
         assert(m_base);
-        return m_base->_call(std::forward<Args>(args)...);
+        m_base->_call(std::forward<Args>(args)...);
+        m_base = nullptr; // 所有回调，只能调用一次
     }
 
     void *get_address() const noexcept {
