@@ -2,7 +2,6 @@
 
 #include <type_traits>
 #include <system_error>
-#include <fmt/core.h>
 
 template <class T>
 struct [[nodiscard]] expected {
@@ -33,7 +32,7 @@ struct [[nodiscard]] expected {
     T expect(char const *what) const {
         if (m_res < 0) {
             auto ec = error_code();
-            fmt::println(stderr, "{}: {}", what, ec.message());
+            // fmt::println(stderr, "{}: {}", what, ec.message());
             throw std::system_error(ec, what);
         }
         return m_res;
@@ -42,7 +41,7 @@ struct [[nodiscard]] expected {
     T value() const {
         if (m_res < 0) {
             auto ec = error_code();
-            fmt::println(stderr, "{}", ec.message());
+            // fmt::println(stderr, "{}", ec.message());
             throw std::system_error(ec);
         }
         // assert(m_res >= 0);

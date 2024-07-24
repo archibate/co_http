@@ -40,7 +40,7 @@ void server() {
         request.write_response(200, response, "image/x-icon");
     });
     server->get_router().route("/send", [](http_server::http_request &request) {
-        fmt::println("/send 收到了 {}", request.body);
+        // fmt::println("/send 收到了 {}", request.body);
         messages.push_back(reflect::json_decode<Message>(request.body));
         recv_timeout_stop.request_stop();
         recv_timeout_stop = stop_source::make();
@@ -52,7 +52,7 @@ void server() {
             std::vector<Message> submessages(messages.begin() + params.first,
                                              messages.end());
             std::string response = reflect::json_encode(submessages);
-            fmt::println("/recv 立即返回 {}", response);
+            // fmt::println("/recv 立即返回 {}", response);
             request.write_response(200, response);
         } else {
             io_context::get().set_timeout(3s, [&request, params] {
@@ -62,7 +62,7 @@ void server() {
                                        messages.end());
                 }
                 std::string response = reflect::json_encode(submessages);
-                fmt::println("/recv 延迟返回 {}", response);
+                // fmt::println("/recv 延迟返回 {}", response);
                 request.write_response(200, response);
             }, recv_timeout_stop);
         }
