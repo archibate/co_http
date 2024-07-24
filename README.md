@@ -6,6 +6,8 @@
 
 最新一期视频中，我们实现了一个基于长轮询的异步聊天服务器。
 
+![](http://142857.red/files/screenshotchatserver.png)
+
 编译和运行：
 
 ```bash
