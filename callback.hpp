@@ -5,6 +5,10 @@
 #include <utility>
 #include <memory>
 
+inline constexpr struct multishot_call_t {
+    explicit multishot_call_t() = default;
+} multishot_call;
+
 template <class... Args>
 struct callback {
     struct _callback_base {
@@ -47,6 +51,11 @@ struct callback {
         assert(m_base);
         m_base->_call(std::forward<Args>(args)...);
         m_base = nullptr; // 所有回调，只能调用一次
+    }
+
+    void operator()(multishot_call_t, Args... args) const {
+        assert(m_base);
+        m_base->_call(std::forward<Args>(args)...);
     }
 
     void *get_address() const noexcept {

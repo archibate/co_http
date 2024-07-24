@@ -13,8 +13,12 @@ struct stop_source {
 
     stop_source() = default;
 
-    stop_source(std::in_place_t)
+    explicit stop_source(std::in_place_t)
         : m_control(std::make_shared<_control_block>()) {}
+
+    static stop_source make() {
+        return stop_source(std::in_place);
+    }
 
     bool stop_requested() const noexcept {
         return m_control && m_control->m_stop;

@@ -50,7 +50,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
             // 寻找匹配的路径
             auto it = m_routes.find(request.url);
             if (it != m_routes.end()) {
-                return it->second(request);
+                return it->second(multishot_call, request);
             }
             // fmt::println("找不到路径: {}", request.url);
             return request.write_response(404, "404 Not Found");
@@ -64,6 +64,7 @@ struct http_server : std::enable_shared_from_this<http_server> {
         http_request_parser<> m_req_parser;
         http_response_writer<> m_res_writer;
         http_router *m_router = nullptr;
+        http_request m_request;
 
         using pointer = std::shared_ptr<http_connection_handler>;
 
@@ -120,21 +121,19 @@ struct http_server : std::enable_shared_from_this<http_server> {
         }
 
         void do_handle() {
-            http_request request{
-                m_req_parser.url(),
-                m_req_parser.method(),
-                std::move(m_req_parser.body()),
-                &m_res_writer,
-                [self = shared_from_this()] {
-                    self->do_write(self->m_res_writer.buffer());
-                },
+            m_request.url = m_req_parser.url();
+            m_request.method = m_req_parser.method();
+            m_request.body = std::move(m_req_parser.body());
+            m_request.m_res_writer = &m_res_writer;
+            m_request.m_resume = [self = shared_from_this()] {
+                self->do_write(self->m_res_writer.buffer());
             };
             m_req_parser.reset_state();
 
             // fmt::println("我的响应头: {}", buffer);
             // fmt::println("我的响应正文: {}", body);
             // fmt::println("正在响应");
-            m_router->do_handle(request);
+            m_router->do_handle(m_request);
         }
 
         void do_write(bytes_const_view buffer) {

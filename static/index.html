@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html>
+<head>
+	<title>在线聊天室</title>
+	<meta charset="UTF-8">
+    <style>
+        .message p {
+            margin: 3px;
+        }
+        div.message {
+            margin: 0px;
+            padding: 6px;
+        }
+        div.input-bar {
+            display: flex;
+            flex-direction: row;
+        }
+        .input-user {
+            width: 10%;
+        }
+        .input-content {
+            flex: 1;
+        }
+        .input-button {
+            flex: 1;
+        }
+        .message-user {
+            color: #666666;
+            font-weight: 600;
+        }
+        .message-user.message-current-user {
+            color: #559966;
+            font-weight: 600;
+        }
+        .message-content {
+            color: #333333;
+            font-weight: 300;
+        }
+        body {
+            display: flex;
+            justify-content: center;
+        }
+        #container {
+            max-width: 800px;
+        }
+        </style>
+    </head>
+    <body>
+        <div id="container">
+            <h1>在线聊天室</h1>
+            <p>小彭老师自主研发的一款现代 C++ 全栈聊天服务器</p>
+            <div class="message-list" id="messages"></div>
+            <div class="input-bar">
+                <input class="input-user" type="text" id="user" placeholder="你的昵称"/>
+                <input class="input-content" type="text" id="content" placeholder="输入你的消息..." autocomplete="off"/>
+                <button class="send-button" id="send">发送</button>
+            </div>
+        </div>
+        <script src="https://unpkg.com/jquery@3.7.1/dist/jquery.js"></script>
+        <script>
+        var messages_first = 0;
+        $(document).ready(function() {
+            $("#send").click(function() {
+                var user = $("#user").val();
+                var content = $("#content").val();
+                $.post("/send", JSON.stringify({user, content}), function(data) {
+                    $("#content").val('');
+                    console.log("/send 返回了:", data);
+                });
+            });
+            // how to make enter on 'content' input triggers send?
+            $("#content").keypress(function(event) {
+                if (event.keyCode === 13) {
+                    $("#send").click();
+                }
+            });
+            function poll() {
+                $.post("/recv", JSON.stringify({first: messages_first}), function(data) {
+                    console.log("/recv 返回了:", data);
+                    var submessages = JSON.parse(data);
+                    var current_user = $("#user").val();
+                    for (var i = 0; i < submessages.length; i++) {
+                        var message = submessages[i];
+                        messages_first++;
+                        var extra_class = '';
+                        if (message.user == current_user)
+                        extra_class = ' message-current-user';
+                        $("#messages").append(`<div class="message"><p class="message-user${extra_class}">${message.user}:</p><p class="message-content">${message.content}<p></div>`);
+                    }
+                    poll();
+                });
+            }
+            poll();
+        });
+        </script>
+    </body>
+</html>
