@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-	<title>在线聊天室</title>
+	<title>小彭老师在线聊天室</title>
 	<meta charset="UTF-8">
     <style>
         .message p {
@@ -36,6 +36,10 @@
             color: #333333;
             font-weight: 300;
         }
+        .brief {
+            color: #444444;
+            font-weight: 300;
+        }
         body {
             display: flex;
             justify-content: center;
@@ -47,8 +51,8 @@
     </head>
     <body>
         <div id="container">
-            <h1>在线聊天室</h1>
-            <p>小彭老师自主研发的一款现代 C++ 全栈聊天服务器</p>
+            <h1>小彭老师在线聊天室</h1>
+            <p class="brief">小彭老师自主研发的一款现代 C++ 全栈聊天服务器 | <a href="https://github.com/archibate/co_http">GitHub 仓库</a></p>
             <div class="message-list" id="messages"></div>
             <div class="input-bar">
                 <input class="input-user" type="text" id="user" placeholder="你的昵称"/>
@@ -56,13 +60,21 @@
                 <button class="send-button" id="send">发送</button>
             </div>
         </div>
-        <script src="https://unpkg.com/jquery@3.7.1/dist/jquery.js"></script>
+        <script src="https://unpkg.com/jquery@3.7.1/dist/jquery.min.js"></script>
         <script>
         var messages_first = 0;
         $(document).ready(function() {
             $("#send").click(function() {
-                var user = $("#user").val();
-                var content = $("#content").val();
+                var user = $("#user").val().trim();
+                var content = $("#content").val().trim();
+                if (content == '') {
+                    alert("请输入昵称哦");
+                    return;
+                }
+                if (content == '') {
+                    alert("消息不能为空");
+                    return;
+                }
                 $.post("send", JSON.stringify({user, content}), function(data) {
                     $("#content").val('');
                     console.log("/send 返回了:", data);

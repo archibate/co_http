@@ -67,8 +67,8 @@ void server() {
             }, recv_timeout_stop);
         }
     });
-    // fmt::println("正在监听：http://127.0.0.1:8080");
-    server->do_start("127.0.0.1", "8080");
+    // fmt::println("正在监听：http://0.0.0.0:8080");
+    server->do_start("0.0.0.0", "8080");
 
     ctx.join();
 }
