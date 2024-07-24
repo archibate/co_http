@@ -29,8 +29,9 @@ struct io_context : timer_context {
         std::array<struct epoll_event, 128> events;
         while (!is_empty()) {
             std::chrono::nanoseconds dt = duration_to_next_timer();
+#if HAS_epoll_pwait2
             struct timespec timeout, *timeoutp = nullptr;
-            if (dt.count() > 0) {
+            if (dt.count() >= 0) {
                 timeout.tv_sec = dt.count() / 1'000'000'000;
                 timeout.tv_nsec = dt.count() % 1'000'000'000;
                 timeoutp = &timeout;
@@ -39,6 +40,16 @@ struct io_context : timer_context {
                 convert_error(epoll_pwait2(m_epfd, events.data(), events.size(),
                                            timeoutp, nullptr))
                     .expect("epoll_pwait2");
+#else
+            int timeout_ms = -1;
+            if (dt.count() >= 0) {
+                timeout_ms = dt.count() / 1'000'000;
+            }
+            int ret =
+                convert_error(epoll_pwait(m_epfd, events.data(), events.size(),
+                                           timeout_ms, nullptr))
+                    .expect("epoll_pwait");
+#endif
             for (int i = 0; i < ret; ++i) {
                 auto cb = callback<>::from_address(events[i].data.ptr);
                 cb();

@@ -9,16 +9,19 @@ project(co_http LANGUAGES CXX)
 
 add_compile_options(-Wall -Wextra -Werror=return-type)
 
+include(CheckSymbolExists)
+check_symbol_exists(epoll_pwait2 "sys/epoll.h" HAS_epoll_pwait2)
+if (HAS_epoll_pwait2)
+    add_definitions(-DHAS_epoll_pwait2)
+endif()
+
 find_package(Threads REQUIRED)
-find_package(fmt)
+
+link_libraries(Threads::Threads)
+include_directories(include)
 
 file(GLOB sources CONFIGURE_DEPENDS *.cpp)
 foreach (source IN ITEMS ${sources})
     get_filename_component(name "${source}" NAME_WLE)
     add_executable(${name} ${name}.cpp)
-    target_link_libraries(${name} PRIVATE Threads::Threads)
-    if (fmt_FOUND)
-        target_link_libraries(${name} PRIVATE fmt::fmt)
-    endif()
-    target_include_directories(${name} PRIVATE include)
 endforeach()

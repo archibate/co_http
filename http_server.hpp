@@ -164,7 +164,6 @@ struct http_server : std::enable_shared_from_this<http_server> {
 
     void do_start(std::string name, std::string port) {
         address_resolver resolver;
-        fmt::println("正在监听：http://{}:{}", name, port);
         auto entry = resolver.resolve(name, port);
         m_listening = async_file::async_bind(entry);
         return do_accept();

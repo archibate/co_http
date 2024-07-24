@@ -9,11 +9,13 @@ void server() {
         if (request.body.empty()) {
             response = "你好，你的请求正文为空哦";
         } else {
-            response = fmt::format("你好，你的请求是: [{}]，共 {} 字节",
-                                   request.body, request.body.size());
+            response = "你好，你的请求是: [" + request.body
+                + "]，共 " + std::to_string(request.body.size())
+                + " 字节";
         }
         request.write_response(200, response);
     });
+    // fmt::println("正在监听：http://127.0.0.1:8080");
     server->do_start("127.0.0.1", "8080");
 
     ctx.join();
