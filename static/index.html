@@ -87,6 +87,14 @@
                     $("#send").click();
                 }
             });
+            function escapeHtml(unsafe) {
+                return unsafe
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+            }
             function poll() {
                 $.post("recv", JSON.stringify({first: messages_first}), function(data) {
                     console.log("/recv 返回了:", data);
@@ -98,7 +106,7 @@
                         var extra_class = '';
                         if (message.user == current_user)
                         extra_class = ' message-current-user';
-                        $("#messages").append(`<div class="message"><p class="message-user${extra_class}">${message.user}:</p><p class="message-content">${message.content}<p></div>`);
+                        $("#messages").append(`<div class="message"><p class="message-user${extra_class}">${escapeHtml(message.user)}:</p><p class="message-content">${escapeHtml(message.content)}<p></div>`);
                     }
                     poll();
                 });
