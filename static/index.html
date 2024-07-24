@@ -63,7 +63,7 @@
             $("#send").click(function() {
                 var user = $("#user").val();
                 var content = $("#content").val();
-                $.post("/send", JSON.stringify({user, content}), function(data) {
+                $.post("send", JSON.stringify({user, content}), function(data) {
                     $("#content").val('');
                     console.log("/send 返回了:", data);
                 });
@@ -75,7 +75,7 @@
                 }
             });
             function poll() {
-                $.post("/recv", JSON.stringify({first: messages_first}), function(data) {
+                $.post("recv", JSON.stringify({first: messages_first}), function(data) {
                     console.log("/recv 返回了:", data);
                     var submessages = JSON.parse(data);
                     var current_user = $("#user").val();

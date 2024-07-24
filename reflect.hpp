@@ -1086,7 +1086,7 @@ inline T json_decode(JsonValue &root) {
     if (!json_decode(root, value, ec)) [[unlikely]] {
         throw std::system_error(ec);
     }
-    return std::move(value);
+    return value;
 }
 
 template <class T>
@@ -1096,6 +1096,6 @@ inline T json_decode(std::string_view json) {
     if (!json_decode(json, value, ec)) [[unlikely]] {
         throw std::system_error(ec);
     }
-    return std::move(value);
+    return value;
 }
 } // namespace reflect
