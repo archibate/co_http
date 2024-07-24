@@ -10,7 +10,7 @@ void client() {
         [client](expected<int> ret,
                  http_client::http_response const &response) {
             ret.expect("http://142857.red");
-            fmt::println("{}", response.body);
+            // fmt::println("{}", response.body);
 
             io_context::get().set_timeout(std::chrono::seconds(1), [client] {
                 client->do_request(
@@ -18,7 +18,7 @@ void client() {
                     [client](expected<int> ret,
                              http_client::http_response const &response) {
                         ret.expect("http://142857.red");
-                        fmt::println("{}", response.body);
+                        // fmt::println("{}", response.body);
                     });
             });
         });
@@ -27,11 +27,11 @@ void client() {
 }
 
 int main() {
-    try {
+    // try {
         client();
-    } catch (std::system_error const &e) {
-        fmt::println("{} ({}/{})", e.what(), e.code().category().name(),
-                     e.code().value());
-    }
+    // } catch (std::system_error const &e) {
+    //     fmt::println("{} ({}/{})", e.what(), e.code().category().name(),
+    //                  e.code().value());
+    // }
     return 0;
 }

@@ -22,11 +22,11 @@ void server() {
 }
 
 int main() {
-    try {
+    // try {
         server();
-    } catch (std::system_error const &e) {
-        fmt::println("{} ({}/{})", e.what(), e.code().category().name(),
-                     e.code().value());
-    }
+    // } catch (std::system_error const &e) {
+    //     fmt::println("{} ({}/{})", e.what(), e.code().category().name(),
+    //                  e.code().value());
+    // }
     return 0;
 }
